@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "description": "Experimental shadow-only Jev checks for OMP verification and tool-action instructions",
+  "license": "MIT",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/seanperkins/omp-jev-watchdog.git"
