@@ -4,7 +4,8 @@ import { fileURLToPath } from "node:url";
 import { $ } from "bun";
 import { evaluateWatchdog, WATCHDOG_RUBRIC_HASH } from "../src/evaluate";
 import type { WatchdogResult } from "../src/types";
-import { REPLAY_CASES, type ReplayCase } from "../test/replay-fixtures";
+import { REPLAY_SUITES, type ReplaySuite } from "../test/replay-corpus";
+import type { ReplayCase } from "../test/replay-fixtures";
 import {
   compareReplayReports,
   createReplayReport,
@@ -17,6 +18,7 @@ interface ReplayOptions {
   input?: string;
   baseline?: string;
   output?: string;
+  suite?: ReplaySuite;
 }
 
 class ReplayCliError extends Error {}
@@ -25,8 +27,29 @@ function parseOptions(args: string[]): ReplayOptions {
   const options: ReplayOptions = {};
   for (let index = 0; index < args.length; index += 2) {
     const flag = args[index];
+    if (flag === "--suite") {
+      const suite = args[index + 1];
+      if (
+        suite !== "original" &&
+        suite !== "development" &&
+        suite !== "holdout" &&
+        suite !== "chronology-development" &&
+        suite !== "chronology-holdout" &&
+        suite !== "all"
+      ) {
+        throw new ReplayCliError(
+          "Use --suite original, development, holdout, chronology-development, chronology-holdout, or all.",
+        );
+      }
+      if (options.suite !== undefined)
+        throw new ReplayCliError("Replay options cannot be repeated.");
+      options.suite = suite;
+      continue;
+    }
     if (flag !== "--input" && flag !== "--baseline" && flag !== "--output") {
-      throw new ReplayCliError("Use --input FILE, --baseline FILE, and/or --output FILE.");
+      throw new ReplayCliError(
+        "Use --input FILE, --baseline FILE, --output FILE, and/or --suite NAME.",
+      );
     }
     const key = flag === "--input" ? "input" : flag === "--baseline" ? "baseline" : "output";
     const path = args[index + 1];
@@ -35,6 +58,9 @@ function parseOptions(args: string[]): ReplayOptions {
     }
     if (options[key] !== undefined) throw new ReplayCliError("Replay options cannot be repeated.");
     options[key] = path;
+  }
+  if (options.input !== undefined && options.suite !== undefined) {
+    throw new ReplayCliError("--suite selects live fixtures and cannot be combined with --input.");
   }
   return options;
 }
@@ -86,7 +112,7 @@ async function main(): Promise<void> {
     }
     const apiKey = credentials.text().trim();
     const runs: Array<{ fixture: ReplayCase; result: WatchdogResult }> = [];
-    for (const fixture of REPLAY_CASES) {
+    for (const fixture of REPLAY_SUITES[options.suite ?? "all"]) {
       runs.push({ fixture, result: await evaluateWatchdog(fixture.packet, { apiKey }) });
     }
     report = createReplayReport(runs, WATCHDOG_RUBRIC_HASH);
