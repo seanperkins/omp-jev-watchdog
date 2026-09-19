@@ -19,9 +19,18 @@ export interface WatchdogPacket {
   omitted: boolean;
 }
 
+export type WatchdogCheckReason =
+  | "no_conflict"
+  | "verification_contradiction"
+  | "instruction_conflict"
+  | "missing_evidence"
+  | "ambiguous_scope"
+  | "truncated_context";
+
 export interface WatchdogCheck {
   kind: "verification" | "instruction";
   verdict: "clear" | "concern" | "insufficient";
+  reason: WatchdogCheckReason;
   confidence: number;
   evidenceIds: string[];
   instructionId?: string;

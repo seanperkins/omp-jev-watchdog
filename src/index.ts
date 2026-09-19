@@ -208,6 +208,7 @@ export default function jevWatchdog(pi: ExtensionAPI): void {
           `Jev shadow: ${latest.status}; ${latest.durationMs}ms; model ${latest.model ?? "unavailable"}`,
           ...latest.checks.flatMap((check) => [
             `${check.kind}: ${check.verdict} (${Math.round(check.confidence * 100)}% model confidence)`,
+            `Reason: ${check.reason}`,
             check.summary,
             `Evidence: ${check.evidenceIds.join(", ") || "none"}${check.instructionId ? `; instruction: ${check.instructionId}` : ""}`,
           ]),

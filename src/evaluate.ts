@@ -4,10 +4,18 @@ import { isRecord } from "@oh-my-pi/pi-utils";
 import verificationPrompt from "./prompts/verification.md" with { type: "text" };
 import verificationClaimPrompt from "./prompts/verification-claim.md" with { type: "text" };
 import verificationEvidencePrompt from "./prompts/verification-evidence.md" with { type: "text" };
+import verificationReasonPrompt from "./prompts/verification-reason.md" with { type: "text" };
 import instructionPrompt from "./prompts/instruction.md" with { type: "text" };
 import instructionEvidencePrompt from "./prompts/instruction-evidence.md" with { type: "text" };
 import instructionRulePrompt from "./prompts/instruction-rule.md" with { type: "text" };
-import type { Evidence, WatchdogCheck, WatchdogPacket, WatchdogResult } from "./types";
+import instructionReasonPrompt from "./prompts/instruction-reason.md" with { type: "text" };
+import type {
+  Evidence,
+  WatchdogCheck,
+  WatchdogCheckReason,
+  WatchdogPacket,
+  WatchdogResult,
+} from "./types";
 
 export interface EvaluateWatchdogOptions {
   apiKey: ApiKey;
@@ -18,6 +26,39 @@ export interface EvaluateWatchdogOptions {
 
 const NONE = "__none__";
 const VERDICTS = { clear: null, concern: null, insufficient: null };
+const REASONS = {
+  instruction: {
+    no_conflict: null,
+    instruction_conflict: null,
+    missing_evidence: null,
+    ambiguous_scope: null,
+    truncated_context: null,
+  },
+  verification: {
+    no_conflict: null,
+    verification_contradiction: null,
+    missing_evidence: null,
+    ambiguous_scope: null,
+    truncated_context: null,
+  },
+};
+
+// Bump the contract marker when non-prompt evaluator semantics change.
+export const WATCHDOG_RUBRIC_HASH: string = new Bun.CryptoHasher("sha256")
+  .update(
+    JSON.stringify([
+      "watchdog-evaluator/v2:typed-reasons:strict-choices:paired-citations:truncation-downgrade",
+      instructionPrompt,
+      instructionEvidencePrompt,
+      instructionRulePrompt,
+      instructionReasonPrompt,
+      verificationPrompt,
+      verificationClaimPrompt,
+      verificationEvidencePrompt,
+      verificationReasonPrompt,
+    ]),
+  )
+  .digest("hex");
 
 function selectors(items: Evidence[]): Record<string, null> {
   return Object.fromEntries([[NONE, null], ...items.map((item) => [item.id, null])]);
@@ -61,11 +102,34 @@ function validAnswers(value: unknown, questions: Questions): value is Record<str
   return true;
 }
 
+function validReason(
+  kind: WatchdogCheck["kind"],
+  verdict: WatchdogCheck["verdict"],
+  reason: string | undefined,
+  incomplete: boolean,
+): reason is WatchdogCheckReason {
+  switch (verdict) {
+    case "clear":
+      return reason === "no_conflict";
+    case "concern":
+      return (
+        reason === (kind === "verification" ? "verification_contradiction" : "instruction_conflict")
+      );
+    case "insufficient":
+      return (
+        reason === "missing_evidence" ||
+        reason === "ambiguous_scope" ||
+        (reason === "truncated_context" && incomplete)
+      );
+  }
+}
+
 function makeCheck(
   kind: WatchdogCheck["kind"],
   answers: Record<string, ChoiceAnswer>,
   sources: Evidence[],
   anchors: Evidence[],
+  incomplete: boolean,
 ): WatchdogCheck | undefined {
   const answer = answers[kind];
   if (answer === undefined) return undefined;
@@ -75,12 +139,15 @@ function makeCheck(
   );
   const verdict = answer.choice;
   if (verdict !== "concern" && verdict !== "clear" && verdict !== "insufficient") return undefined;
+  const reason = answers[`${kind}_reason`]?.choice;
+  if (!validReason(kind, verdict, reason, incomplete)) return undefined;
   if (verdict === "concern" && (source === undefined || anchor === undefined)) return undefined;
   if (verdict !== "concern" && (source !== undefined || anchor !== undefined)) return undefined;
   if (verdict === "concern" && (source?.truncated || anchor?.truncated)) {
     return {
       kind,
       verdict: "insufficient",
+      reason: "truncated_context",
       confidence: answer.confidence,
       evidenceIds: [],
       summary: "Selected evidence is truncated; no candidate concern retained.",
@@ -90,6 +157,7 @@ function makeCheck(
     return {
       kind,
       verdict,
+      reason,
       confidence: answer.confidence,
       evidenceIds: kind === "verification" ? [anchor.id, source.id] : [source.id],
       ...(kind === "instruction" ? { instructionId: anchor.id } : {}),
@@ -102,12 +170,17 @@ function makeCheck(
   return {
     kind,
     verdict,
+    reason,
     confidence: answer.confidence,
     evidenceIds: [],
     summary:
       verdict === "clear"
         ? "No material conflict identified in supplied evidence."
-        : "Supplied evidence is insufficient to decide; no candidate concern retained.",
+        : reason === "missing_evidence"
+          ? "Required evidence is missing; no candidate concern retained."
+          : reason === "ambiguous_scope"
+            ? "Evidence scope or chronology is ambiguous; no candidate concern retained."
+            : "Context is omitted or truncated; no candidate concern retained.",
   };
 }
 
@@ -156,6 +229,11 @@ export async function evaluateWatchdog(
   };
   const questions: Questions = {
     instruction: { type: "choice", instructions: instructionPrompt, criteria: VERDICTS },
+    instruction_reason: {
+      type: "choice",
+      instructions: instructionReasonPrompt,
+      criteria: REASONS.instruction,
+    },
   };
   if (actions.length > 0)
     questions.instruction_evidence = {
@@ -174,6 +252,11 @@ export async function evaluateWatchdog(
       type: "choice",
       instructions: verificationPrompt,
       criteria: VERDICTS,
+    };
+    questions.verification_reason = {
+      type: "choice",
+      instructions: verificationReasonPrompt,
+      criteria: REASONS.verification,
     };
     if (claims.length > 0)
       questions.verification_claim = {
@@ -233,12 +316,19 @@ export async function evaluateWatchdog(
     )
       return unavailable("invalid_response");
     const checks: WatchdogCheck[] = [];
+    const incomplete = packet.omitted || allEvidence.some((item) => item.truncated === true);
     if (packet.phase === "complete") {
-      const check = makeCheck("verification", response.answers, results, claims);
+      const check = makeCheck("verification", response.answers, results, claims, incomplete);
       if (check === undefined) return unavailable("invalid_response");
       checks.push(check);
     }
-    const instruction = makeCheck("instruction", response.answers, actions, instructions);
+    const instruction = makeCheck(
+      "instruction",
+      response.answers,
+      actions,
+      instructions,
+      incomplete,
+    );
     if (instruction === undefined) return unavailable("invalid_response");
     checks.push(instruction);
     return {

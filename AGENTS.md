@@ -24,7 +24,8 @@ RFC 2119 applies to MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL. `NEVER` 
 | `src/evaluate.ts` and `src/prompts/` | Native TypeSafe judgment, static rubrics, validation, evidence selection        |
 | `src/types.ts`                       | Packet, check, result, and record contracts                                     |
 | `test/`                              | Deterministic regression tests and synthetic replay fixtures                    |
-| `scripts/replay.ts`                  | Live-service evaluation and citation-aware scoring                              |
+| `scripts/replay.ts`                  | Live-service evaluation and offline report CLI                                  |
+| `scripts/replay-report.ts`           | Citation-aware scoring, report validation, per-check summaries and comparisons    |
 
 `evaluation-results.json` is a historical live report, not a passing-test guarantee. The manifest pins the OMP development SDK to 18.2.4. You MUST inspect the installed SDK contracts before changing extension integration; NEVER assume newer upstream APIs exist in the target host.
 

@@ -56,7 +56,7 @@ Requirements: [Bun](https://bun.sh) 1.3.14 or newer, OMP on your `PATH`, and a T
 | Command                                   | Behavior                                                             |
 | ----------------------------------------- | -------------------------------------------------------------------- |
 | `/jev-watchdog` or `/jev-watchdog status` | Mode, availability, current-prompt counts, token usage, and deadline |
-| `/jev-watchdog latest`                    | Most recent recorded check for this prompt, with evidence IDs        |
+| `/jev-watchdog latest`                    | Most recent check for this prompt, with typed reasons and evidence IDs |
 | `/jev-watchdog off`                       | Disable checks and cancel pending work for this session              |
 | `/jev-watchdog shadow`                    | Re-enable shadow checks for this session                             |
 
@@ -69,7 +69,20 @@ The off/shadow choice is saved in the session branch. A new session starts in sh
 | `insufficient` | Not enough usable evidence to decide                                               |
 | `not_checked`  | No valid judgment: timeout, unavailability, or an invalid response                 |
 
-**Confidence is an uncalibrated model signal, not a probability that the finding is correct.** Inspect the cited evidence before acting. `latest` reports summaries and IDs; redacted evidence packets are stored as `jev-watchdog-review` custom entries in OMP's session JSONL. Those entries are not messages to the main model. Session mode entries use `jev-watchdog-mode`.
+**Confidence is an uncalibrated model signal, not a probability that the finding is correct.** Inspect the cited evidence before acting. `latest` reports reasons, summaries, and IDs; redacted evidence packets are stored as `jev-watchdog-review` custom entries in OMP's session JSONL. Those entries are not messages to the main model. Session mode entries use `jev-watchdog-mode`.
+
+Each checked result includes a closed-choice reason:
+
+| Reason | Verdict | Meaning |
+| ------ | ------- | ------- |
+| `no_conflict` | `clear` | No material conflict identified in the supplied evidence |
+| `verification_contradiction` | `concern` | A final claim conflicts with a directly relevant tool result |
+| `instruction_conflict` | `concern` | An observed action conflicts with an applicable explicit user instruction |
+| `missing_evidence` | `insufficient` | Required evidence is absent |
+| `ambiguous_scope` | `insufficient` | Relevance, applicability, scope, or chronology cannot be established |
+| `truncated_context` | `insufficient` | Omitted or truncated context prevents a decision |
+
+Reasons explain the existing checks; they are not new detectors or proof of a defect. They are selected in the same bounded request, not a follow-up call. Invalid reason/verdict combinations become `not_checked` with `invalid_response`. A selected truncated citation still downgrades a concern to `insufficient`/`truncated_context`, without retaining candidate citations.
 
 Each evaluation has a **1,000 ms total deadline**, with no HTTP retry or LLM fallback. Newer evidence can supersede an in-flight result. Completion checks take priority over working checks; shutdown drains outstanding bounded work so the final record can be saved.
 
@@ -121,6 +134,30 @@ bun run replay --output /tmp/omp-jev-watchdog-replay.json
 ```
 
 This requires configured TypeSafe credentials and makes billable API requests. The runner resolves credentials through `omp token` internally without printing them. It writes the report even when a case fails and exits nonzero if any verdict or required citation differs from expectations. The historical committed report includes a mismatch; a nonzero replay exit is not necessarily a transport failure. Inspect the report rather than assuming all checks passed.
+
+### Replay reports and baselines
+
+Reports include independent `summary.byCheck.verification` and `summary.byCheck.instruction` counts: verdict matches, citation-aware matches, false positives, missed concerns, citation mismatches, uncertainty, unavailable checks, and typed reasons. `insufficient` and `not_checked` remain coverage gaps, not clear results or missed-concern verdicts. A fixture that expects `insufficient` can match while still recording that uncertainty. Model identities, latency statistics, and token totals are reported separately; joint-request usage is counted once, not once per check.
+
+To compare a later live run against a saved baseline:
+
+```sh
+bun run replay --baseline /tmp/omp-jev-watchdog-replay.json --output /tmp/omp-jev-watchdog-comparison.json
+```
+
+To analyze saved reports locally, without credentials or API calls:
+
+```sh
+bun run replay --input /tmp/omp-jev-watchdog-comparison.json --baseline /tmp/omp-jev-watchdog-replay.json --output /tmp/omp-jev-watchdog-analysis.json
+```
+
+`--input` also works without `--baseline`, including `bun run replay --input evaluation-results.json`. Pass counts are recomputed from expected verdicts and citations rather than trusting saved `passed` flags. Offline analysis retains the same nonzero mismatch exit behavior as live replay. Prior evaluations are never sent to Jev.
+
+New reports carry a SHA256 `rubricHash` covering static prompts and an evaluator-contract marker, plus a per-case `fixtureHash` covering the packet and expectations. Packet contents are not added to replay reports. Comparison rows are comparable only when known fixture hashes and expected meanings agree. Rubric and model identities remain visible so a change of evaluator can be assessed on the same fixtures.
+
+Unknown or changed evidence identity produces `incomparable`, never an improvement claim. The committed historical report lacks hashes and typed reasons; these remain unknown rather than being backfilled. Its verdict counts can still be inspected, but its comparison rows are incomparable. Count deltas describe whole-report differences, not matched-only accuracy changes. Losing checking coverage is not resolution, and `improved` means better agreement with a synthetic fixture—not proven improvement on real work.
+
+The CLI refuses to overwrite the committed historical report. Save new reports outside the checkout unless intentionally adding a new, reviewed synthetic trial.
 
 ## License
 

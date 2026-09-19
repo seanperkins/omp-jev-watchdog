@@ -24,8 +24,23 @@ function responseBody(
   const answers: Record<string, ChoiceAnswer> = {};
   for (const [id, question] of Object.entries(request.questions)) {
     if (question.type !== "choice") throw new Error("Unexpected non-choice question");
+    const kind = id.startsWith("verification") ? "verification" : "instruction";
+    const verdict = selected[kind] ?? "clear";
+    const defaultReason =
+      verdict === "concern"
+        ? kind === "verification"
+          ? "verification_contradiction"
+          : "instruction_conflict"
+        : verdict === "insufficient"
+          ? "missing_evidence"
+          : "no_conflict";
     const choice =
-      selected[id] ?? (id === "instruction" || id === "verification" ? "clear" : "__none__");
+      selected[id] ??
+      (id.endsWith("_reason")
+        ? defaultReason
+        : id === "instruction" || id === "verification"
+          ? "clear"
+          : "__none__");
     answers[id] = {
       type: "choice",
       choice,
@@ -73,6 +88,7 @@ describe("native TypeSafe watchdog boundary", () => {
     expect(result.checks.find((check) => check.kind === "verification")).toMatchObject({
       kind: "verification",
       verdict: "concern",
+      reason: "verification_contradiction",
       confidence: 0.83,
       evidenceIds: ["e3", "e2"],
     });
@@ -95,6 +111,7 @@ describe("native TypeSafe watchdog boundary", () => {
     expect(result.checks.find((check) => check.kind === "instruction")).toMatchObject({
       kind: "instruction",
       verdict: "concern",
+      reason: "instruction_conflict",
       confidence: 0.83,
       evidenceIds: ["e1"],
       instructionId: "u1",
@@ -110,6 +127,11 @@ describe("native TypeSafe watchdog boundary", () => {
     });
     expect(result.status).toBe("checked");
     expect(result.checks.map((check) => check.kind)).toEqual(["instruction"]);
+    expect(result.checks[0]).toMatchObject({
+      verdict: "clear",
+      reason: "no_conflict",
+      evidenceIds: [],
+    });
   });
 
   test("missing verification evidence stays insufficient rather than clear or concern", async () => {
@@ -122,6 +144,7 @@ describe("native TypeSafe watchdog boundary", () => {
     expect(result.status).toBe("checked");
     expect(result.checks.find((check) => check.kind === "verification")).toMatchObject({
       verdict: "insufficient",
+      reason: "missing_evidence",
       evidenceIds: [],
     });
   });
@@ -145,6 +168,7 @@ describe("native TypeSafe watchdog boundary", () => {
     expect(result.status).toBe("checked");
     expect(result.checks.find((check) => check.kind === "verification")).toMatchObject({
       verdict: "insufficient",
+      reason: "truncated_context",
       evidenceIds: [],
     });
   });
@@ -291,4 +315,135 @@ describe("native TypeSafe watchdog boundary", () => {
     });
     expect(result).toMatchObject({ status: "not_checked", reason: "invalid_response", checks: [] });
   });
+
+  test("a clear verdict cannot retain a concern explanation", async () => {
+    const result = await evaluateWatchdog(failurePacket(), {
+      apiKey: "local-test-only",
+      fetch: async (_input, init) =>
+        Response.json(responseBody(init, { verification_reason: "verification_contradiction" })),
+    });
+    expect(result).toMatchObject({ status: "not_checked", reason: "invalid_response", checks: [] });
+  });
+
+  test("a truncation explanation requires actual omitted or truncated context", async () => {
+    const result = await evaluateWatchdog(failurePacket(), {
+      apiKey: "local-test-only",
+      fetch: async (_input, init) =>
+        Response.json(
+          responseBody(init, {
+            verification: "insufficient",
+            verification_reason: "truncated_context",
+          }),
+        ),
+    });
+    expect(result).toMatchObject({ status: "not_checked", reason: "invalid_response", checks: [] });
+  });
+
+  test.each([
+    ["concern", "no_conflict"],
+    ["insufficient", "verification_contradiction"],
+  ])("rejects incompatible verification verdict %s and reason %s", async (verdict, reason) => {
+    const result = await evaluateWatchdog(failurePacket(), {
+      apiKey: "local-test-only",
+      fetch: async (_input, init) =>
+        Response.json(
+          responseBody(init, {
+            verification: verdict,
+            verification_reason: reason,
+            ...(verdict === "concern"
+              ? { verification_claim: "e3", verification_evidence: "e2" }
+              : {}),
+          }),
+        ),
+    });
+    expect(result).toMatchObject({ status: "not_checked", reason: "invalid_response", checks: [] });
+  });
+
+  test.each(["unknown_reason", "instruction_conflict"])(
+    "rejects unsupported verification reason %s",
+    async (reason) => {
+      const result = await evaluateWatchdog(failurePacket(), {
+        apiKey: "local-test-only",
+        fetch: async (_input, init) =>
+          Response.json(
+            responseBody(init, {
+              verification: "concern",
+              verification_reason: reason,
+              verification_claim: "e3",
+              verification_evidence: "e2",
+            }),
+          ),
+      });
+      expect(result).toMatchObject({
+        status: "not_checked",
+        reason: "invalid_response",
+        checks: [],
+      });
+    },
+  );
+
+  test.each(["instruction", "verification"])("requires the %s reason answer", async (kind) => {
+    const packet = failurePacket();
+    if (kind === "instruction") packet.phase = "working";
+    const result = await evaluateWatchdog(packet, {
+      apiKey: "local-test-only",
+      fetch: async (_input, init) => {
+        const body = responseBody(init);
+        delete body.answers[`${kind}_reason`];
+        return Response.json(body);
+      },
+    });
+    expect(result).toMatchObject({ status: "not_checked", reason: "invalid_response", checks: [] });
+  });
+
+  test("ambiguous scope remains insufficient without candidate citations", async () => {
+    const result = await evaluateWatchdog(failurePacket(), {
+      apiKey: "local-test-only",
+      fetch: async (_input, init) =>
+        Response.json(
+          responseBody(init, {
+            verification: "insufficient",
+            verification_reason: "ambiguous_scope",
+          }),
+        ),
+    });
+    expect(result.status).toBe("checked");
+    expect(result.checks.find((check) => check.kind === "verification")).toMatchObject({
+      verdict: "insufficient",
+      reason: "ambiguous_scope",
+      evidenceIds: [],
+    });
+  });
+
+  test.each(["omitted", "truncated_instruction"])(
+    "accepts a truncation explanation for %s context",
+    async (incompleteness) => {
+      const packet = failurePacket();
+      if (incompleteness === "omitted") packet.omitted = true;
+      else {
+        const instruction = packet.instructions[0];
+        if (instruction === undefined) throw new Error("Missing user instruction");
+        instruction.truncated = true;
+      }
+      const result = await evaluateWatchdog(packet, {
+        apiKey: "local-test-only",
+        fetch: async (_input, init) =>
+          Response.json(
+            responseBody(init, {
+              instruction: "insufficient",
+              instruction_reason: "truncated_context",
+              verification: "insufficient",
+              verification_reason: "truncated_context",
+            }),
+          ),
+      });
+      expect(result.status).toBe("checked");
+      expect(
+        result.checks.map((check) => [check.verdict, check.reason, check.evidenceIds]),
+      ).toEqual([
+        ["insufficient", "truncated_context", []],
+        ["insufficient", "truncated_context", []],
+      ]);
+    },
+  );
 });
