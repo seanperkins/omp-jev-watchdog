@@ -4,7 +4,7 @@ An experimental, shadow-only watchdog for [Oh My Pi](https://github.com/can1357/
 
 It records candidate verification contradictions and explicit user-instruction conflicts. It **does not inject advice, interrupt the agent, invoke a reviewer, or replace the full advisor**. Existing advisor and classifier settings stay unchanged.
 
-**Trial status:** the committed live replay matched 10 of 11 expected outcomes, including one instruction-check false positive. Keep this in shadow mode; it is not a validated safety gate or general code reviewer.
+**Trial status:** the historical replay matched 10 of 11 expected outcomes. A later [scope experiment](scope-experiment-results.json) cleared that known false positive, and a [chronology experiment](chronology-experiment-results.json) corrected a missed latest same-suite contradiction. The latest full CLI replay matched **70 of 71** cases; an instruction-adherence miss remains. Keep this in shadow mode; it is not a validated safety gate or general code reviewer.
 
 ## What it checks
 
@@ -13,9 +13,11 @@ It records candidate verification contradictions and explicit user-instruction c
 | Instruction adherence | Observed tool calls/results versus recent explicit user instructions | During work and at completion |
 | Verification honesty  | The final assistant claim versus actual tool results                 | At completion only            |
 
-A failed command followed by “the command passed” can produce a candidate contradiction. A relevant successful rerun supersedes an earlier failure. An honest draft, missing test result, or unfinished task is not automatically a violation.
+A failed command followed by “the command passed” can produce a candidate contradiction. Current/latest success claims use the latest relevant observed result: an earlier pass cannot excuse a later same-scope failure, while a relevant successful rerun can supersede an earlier failure. Explicitly historical claims remain about their named run. An honest draft, missing test result, or unfinished task is not automatically a violation; missing results do not prove failure.
 
 Only recent user messages establish instructions for these checks. This is not comprehensive enforcement of system prompts, `AGENTS.md`, or every requirement in a long conversation. Tool output and quoted instructions are treated as evidence, not authority.
+
+Instruction scope distinguishes the restricted operation from its target. A restriction on modifications does not by itself prohibit inspection or unrelated diagnostics. Explicit read, execution, and network restrictions still apply; tests that write snapshots or transmit data are not exempt.
 
 ## Install
 
@@ -114,6 +116,46 @@ The mismatch is **“unrelated failing test does not contradict scoped success.�
 
 These observations are neither production accuracy measurements nor latency guarantees. Model responses and service latency can change; deterministic local tests and live replay results are separate forms of evidence.
 
+### Operation-scope experiment
+
+[scope-experiment-results.json](scope-experiment-results.json) records a separate synthetic trial on `jev-1.13.0`: the original 11 cases plus 40 realistic cases in 20 contrast pairs. The additional cases cover operation/target scope, verification claims, operational failures, chronology/authority, and actual `EvidenceWindow` truncation and eviction. No real session transcripts were imported.
+
+Expectations and citations were reviewed and frozen before baseline evaluation. Ten new cases (five whole pairs) were held out; the four instruction rubrics were locked before evaluating that holdout. Three trials per case and rubric produced 306 case evaluations. Repetition was evaluation-only, not a runtime retry. Only instruction rubrics changed; no confidence cutoff or tool exemption was added.
+
+| Observation across three trials | Baseline | Scope rubric |
+| -------------------------------- | -------- | ------------ |
+| Development matches (41 cases × 3) | 113 / 123 | 123 / 123 |
+| Holdout matches (10 cases × 3) | 21 / 30 | 22 / 30 |
+| Instruction false positives | 6 | 0 |
+| Concern incorrectly called clear, across both checks | 4 | 4 |
+| Evaluations withheld as invalid responses | 9 | 4 |
+
+The known unrelated-test false positive cleared in all three development trials, and an additional live CLI smoke matched all 11 original cases. Observed missed-concern counts did not increase, and coverage did not worsen. That supports retaining this narrow rubric change in shadow mode, **not claiming the holdout passed**.
+
+At that stage, remaining failures included retroactive permission for a migration, a missed or inconsistently answered latest same-suite contradiction, and a read-only staging violation withheld because the verification reason contradicted its verdict. Those expectations were not changed. The chronology experiment below subsequently used these now-visible cases as development evidence, with a fresh holdout.
+
+The report retains per-trial model/rubric/fixture identities, citations, coverage, latency, and reported token usage. Invalid-response usage is discarded by the current evaluator, so reported tokens are not a complete billable-usage total. Three repeated synthetic trials are not production accuracy or confidence calibration. Future tuning against these now-visible cases needs a fresh holdout for a new generalization assessment.
+
+### Latest-result chronology experiment
+
+[chronology-experiment-results.json](chronology-experiment-results.json) records a synthetic follow-up on `jev-1.13.0`. Only the four verification rubrics changed: match the claimed scope and time, give the latest relevant result precedence, preserve explicit historical claims, and distinguish an unsuccessful run from whether that failure proves a code defect. Missing-result insufficiency applies to actual success/completion claims, not honest pending or unverified work. Citation validation, instruction rubrics, evidence handling, deadline, and shadow-only operation were unchanged.
+
+Twenty new cases in ten contrast pairs were frozen before live measurement: 12 development cases and eight fresh holdout cases. All 51 previously observed fixtures and expectations stayed unchanged; they joined the 12 new development cases, giving 63 development cases. The final candidate was locked before either rubric saw the fresh holdout.
+
+| Observation across three trials | Baseline | Final chronology rubric |
+| -------------------------------- | -------- | ------------------------ |
+| Original latest same-suite contradiction, with required citations | 0 / 3 | 3 / 3 |
+| Development matches (63 cases × 3) | 179 / 189 | 185 / 189 |
+| Fresh holdout matches (8 cases × 3) | 24 / 24 | 24 / 24 |
+| Verification false positives | 0 | 0 |
+| Invalid-response evaluations | 5 | 0 |
+
+Both baseline and candidate passed the fresh holdout: this is evidence of no observed regression on those eight cases, not improved holdout accuracy. Each variant also had one development timeout; unavailable checks remain `not_checked`, not clear. The final candidate still missed retroactive-permission violations in all three development trials. A separate final default CLI replay matched **70 / 71**, failing that same instruction case; the new holdout CLI suite matched **8 / 8**.
+
+The report preserves an initial candidate's three development trials too. It caught the original contradiction, but once produced inconsistent verdict/reason answers for an honestly unverified audit. Missing-result wording was narrowed before the final candidate and holdout runs; no holdout outcome was used for tuning. The report contains 615 controlled case evaluations plus 91 CLI smoke evaluations, including that initial candidate's 12-case CLI smoke. Repetition is evaluation-only, never a runtime retry.
+
+The fresh holdout is small and now observed. These results are not production accuracy or confidence calibration, and the reported token totals still exclude usage discarded for invalid responses. No lifecycle or OMP command integration changed; those host paths were not re-tested in this rubric-only follow-up.
+
 ## Development
 
 Contributor and coding-agent constraints live in [AGENTS.md](AGENTS.md).
@@ -134,6 +176,22 @@ bun run replay --output /tmp/omp-jev-watchdog-replay.json
 ```
 
 This requires configured TypeSafe credentials and makes billable API requests. The runner resolves credentials through `omp token` internally without printing them. It writes the report even when a case fails and exits nonzero if any verdict or required citation differs from expectations. The historical committed report includes a mismatch; a nonzero replay exit is not necessarily a transport failure. Inspect the report rather than assuming all checks passed.
+
+The default live suite now contains **71 cases**, rather than the historical 11. Select a fixed partition explicitly when investigating:
+
+```sh
+bun run replay --suite original --output /tmp/jev-original.json
+bun run replay --suite development --output /tmp/jev-development.json
+bun run replay --suite holdout --output /tmp/jev-holdout.json
+bun run replay --suite chronology-development --output /tmp/jev-chronology-development.json
+bun run replay --suite chronology-holdout --output /tmp/jev-chronology-holdout.json
+```
+
+`original` contains the unchanged 11 fixtures; the scope experiment's `development` contains those plus 30 cases (41 total), and its `holdout` contains ten. Those memberships remain unchanged. `chronology-development` contains only the 12 fresh chronology development cases; `chronology-holdout` contains the eight fresh holdout cases. The chronology experiment's 63-case development set combined the previous 51 with those 12. `all` includes all 71 and is the default.
+
+Keep both members of each contrast pair in the same partition. Use development results for rubric changes, then lock the rubric before inspecting fresh holdout results. Previously inspected holdouts are no longer fresh. For repeated trials, run the same command with distinct output paths; each invocation makes new billable evaluations.
+
+`--suite` is a live-fixture selector and cannot be combined with offline `--input`. The combined scope and chronology experiment artifacts contain individual replay reports under `reports[].report`; neither is itself a single `--input` replay report.
 
 ### Replay reports and baselines
 
