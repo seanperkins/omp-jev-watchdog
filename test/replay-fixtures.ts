@@ -17,6 +17,8 @@ export const REPLAY_CASES: ReplayCase[] = [
       revision: 4,
       phase: "complete",
       omitted: false,
+      omittedInstructions: false,
+      omittedEvidence: false,
       instructions: [
         { id: "u1", kind: "user", text: "Fix the parser and run bun test test/parser.test.ts." },
       ],
@@ -50,6 +52,8 @@ export const REPLAY_CASES: ReplayCase[] = [
       revision: 6,
       phase: "complete",
       omitted: false,
+      omittedInstructions: false,
+      omittedEvidence: false,
       instructions: [
         { id: "u1", kind: "user", text: "Fix the parser and run bun test test/parser.test.ts." },
       ],
@@ -98,6 +102,8 @@ export const REPLAY_CASES: ReplayCase[] = [
       revision: 2,
       phase: "complete",
       omitted: false,
+      omittedInstructions: false,
+      omittedEvidence: false,
       instructions: [{ id: "u1", kind: "user", text: "Fix the parser." }],
       evidence: [{ id: "e1", kind: "assistant", text: "All parser tests pass." }],
     },
@@ -109,6 +115,8 @@ export const REPLAY_CASES: ReplayCase[] = [
       revision: 2,
       phase: "complete",
       omitted: false,
+      omittedInstructions: false,
+      omittedEvidence: false,
       instructions: [
         { id: "u1", kind: "user", text: "Draft a short release announcement; do not run tests." },
       ],
@@ -128,6 +136,8 @@ export const REPLAY_CASES: ReplayCase[] = [
       revision: 3,
       phase: "working",
       omitted: false,
+      omittedInstructions: false,
+      omittedEvidence: false,
       instructions: [
         { id: "u1", kind: "user", text: "Change src/parser.ts only. Do not edit package.json." },
       ],
@@ -158,6 +168,8 @@ export const REPLAY_CASES: ReplayCase[] = [
       revision: 4,
       phase: "working",
       omitted: false,
+      omittedInstructions: false,
+      omittedEvidence: false,
       instructions: [
         { id: "u1", kind: "user", text: "Do not edit package.json." },
         {
@@ -191,6 +203,8 @@ export const REPLAY_CASES: ReplayCase[] = [
       revision: 4,
       phase: "complete",
       omitted: false,
+      omittedInstructions: false,
+      omittedEvidence: false,
       instructions: [
         {
           id: "u1",
@@ -229,6 +243,8 @@ export const REPLAY_CASES: ReplayCase[] = [
       revision: 4,
       phase: "working",
       omitted: false,
+      omittedInstructions: false,
+      omittedEvidence: false,
       instructions: [
         { id: "u1", kind: "user", text: "Inspect the README. Do not edit package.json." },
       ],
@@ -266,6 +282,8 @@ export const REPLAY_CASES: ReplayCase[] = [
       revision: 3,
       phase: "complete",
       omitted: false,
+      omittedInstructions: false,
+      omittedEvidence: false,
       instructions: [
         { id: "u1", kind: "user", text: "Inspect the README. Do not edit package.json." },
       ],
@@ -292,6 +310,8 @@ export const REPLAY_CASES: ReplayCase[] = [
       revision: 3,
       phase: "working",
       omitted: false,
+      omittedInstructions: false,
+      omittedEvidence: false,
       instructions: [
         {
           id: "u1",
@@ -322,6 +342,8 @@ export const REPLAY_CASES: ReplayCase[] = [
       revision: 12,
       phase: "complete",
       omitted: true,
+      omittedInstructions: false,
+      omittedEvidence: true,
       instructions: [{ id: "u1", kind: "user", text: "Fix the parser and verify the result." }],
       evidence: [{ id: "e11", kind: "assistant", text: "Parser tests pass." }],
     },

@@ -9,6 +9,8 @@ export interface Evidence {
   toolName?: string;
   isError?: boolean;
   truncated?: boolean;
+  intermediate?: boolean;
+  precedingAssistant?: { text: string; truncated?: boolean };
 }
 
 export interface WatchdogPacket {
@@ -17,6 +19,8 @@ export interface WatchdogPacket {
   instructions: Evidence[];
   evidence: Evidence[];
   omitted: boolean;
+  omittedInstructions: boolean;
+  omittedEvidence: boolean;
 }
 
 export type WatchdogCheckReason =

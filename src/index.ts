@@ -1,10 +1,14 @@
-import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
+import {
+  isUserTurnInitiator,
+  type ExtensionAPI,
+  type ExtensionContext,
+} from "@oh-my-pi/pi-coding-agent";
 import { buildSecretObfuscator } from "@oh-my-pi/pi-coding-agent/secrets";
 import { replaceTabs, truncateToWidth } from "@oh-my-pi/pi-tui";
 import { getAgentDir } from "@oh-my-pi/pi-utils";
 import { ShadowWatchdog } from "./controller";
 import { evaluateWatchdog } from "./evaluate";
-import { EvidenceWindow, MAX_USER_MESSAGES } from "./packet";
+import { EvidenceWindow } from "./packet";
 import { obfuscateToolArguments } from "@oh-my-pi/pi-coding-agent/secrets/message-transform";
 
 const RECORD_TYPE = "jev-watchdog-review";
@@ -57,30 +61,49 @@ export default function jevWatchdog(pi: ExtensionAPI): void {
     changed: refresh,
   });
 
-  const restoreUserContext = (ctx: ExtensionContext): string | undefined => {
+  const restoreUserContext = (ctx: ExtensionContext, prompt?: string): void => {
     if (!window) return;
+    let latestPrompt: string | undefined;
+    let precedingAssistant: string | undefined;
     const branch = ctx.sessionManager.getBranch();
-    const messages: string[] = [];
-    // One extra message lets the packet builder mark older context as omitted.
-    for (
-      let index = branch.length - 1;
-      index >= 0 && messages.length <= MAX_USER_MESSAGES;
-      index--
-    ) {
+    const start = branch.findLastIndex((entry) => entry.type === "reset_boundary") + 1;
+    for (let index = start; index < branch.length; index++) {
       const entry = branch[index];
-      if (!entry || entry.type !== "message" || entry.message.role !== "user") continue;
-      const content = entry.message.content;
-      const text =
-        typeof content === "string"
-          ? content
-          : content
-              .filter((block) => block.type === "text")
-              .map((block) => block.text)
-              .join("\n");
-      messages.push(text);
+      if (!entry) continue;
+      if (
+        entry.type === "custom_message" &&
+        isUserTurnInitiator({ ...entry, role: "custom", timestamp: Date.parse(entry.timestamp) })
+      ) {
+        precedingAssistant = undefined;
+        latestPrompt = undefined;
+        continue;
+      }
+      if (entry.type !== "message") continue;
+      const message = entry.message;
+      if (message.role !== "user" && message.role !== "assistant") continue;
+      let text: string;
+      if (typeof message.content === "string") {
+        text = message.content;
+      } else {
+        const blocks: string[] = [];
+        for (const block of message.content) {
+          if (block.type === "text" && "text" in block && typeof block.text === "string") {
+            blocks.push(block.text);
+          }
+        }
+        text = blocks.join("\n");
+      }
+      if (message.role === "assistant") {
+        if (text.trim()) precedingAssistant = text;
+      } else {
+        window.addUser(text, precedingAssistant);
+        latestPrompt = text;
+        precedingAssistant = undefined;
+      }
     }
-    for (let index = messages.length - 1; index >= 0; index--) window.addUser(messages[index]!);
-    return messages[0];
+    if (prompt !== undefined && (latestPrompt !== prompt || precedingAssistant !== undefined)) {
+      window.addUser(prompt, precedingAssistant);
+    }
   };
 
   const initialize = async (ctx: ExtensionContext): Promise<void> => {
@@ -130,8 +153,7 @@ export default function jevWatchdog(pi: ExtensionAPI): void {
     controller.reset();
     if (!window) return;
     window.reset();
-    const latestPrompt = restoreUserContext(ctx);
-    if (latestPrompt !== event.prompt) window.addUser(event.prompt);
+    restoreUserContext(ctx, event.prompt);
     available = ctx.modelRegistry.authStorage.hasAuth("typesafe");
     refresh();
   });
@@ -156,9 +178,10 @@ export default function jevWatchdog(pi: ExtensionAPI): void {
       .filter((block) => block.type === "text")
       .map((block) => block.text)
       .join("\n");
-    window.addAssistant(text);
+    const hasToolCalls = message.content.some((block) => block.type === "toolCall");
+    window.addAssistant(text, hasToolCalls);
     // Verification is deliberately withheld until the genuine completion boundary.
-    if (message.content.some((block) => block.type === "toolCall")) {
+    if (hasToolCalls) {
       const packet = window.snapshot("working");
       if (packet) controller.submit(packet);
     }
@@ -207,7 +230,7 @@ export default function jevWatchdog(pi: ExtensionAPI): void {
         const lines = [
           `Jev shadow: ${latest.status}; ${latest.durationMs}ms; model ${latest.model ?? "unavailable"}`,
           ...latest.checks.flatMap((check) => [
-            `${check.kind}: ${check.verdict} (${Math.round(check.confidence * 100)}% model confidence)`,
+            `${check.kind}: ${check.verdict} (${Math.round(check.confidence * 100)}% uncalibrated confidence)`,
             `Reason: ${check.reason}`,
             check.summary,
             `Evidence: ${check.evidenceIds.join(", ") || "none"}${check.instructionId ? `; instruction: ${check.instructionId}` : ""}`,

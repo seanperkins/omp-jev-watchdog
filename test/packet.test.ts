@@ -7,7 +7,6 @@ import {
   MAX_EVIDENCE_EVENTS,
   MAX_PACKET_CHARACTERS,
   MAX_USER_CHARACTERS,
-  MAX_USER_MESSAGES,
 } from "../src/packet";
 import type { WatchdogPacket } from "../src/types";
 
@@ -137,13 +136,80 @@ describe("EvidenceWindow", () => {
     expect(result.omitted).toBe(false);
   });
 
+  test("retains task restrictions across short approvals and continuation turns", () => {
+    const window = new EvidenceWindow(
+      (text) => text,
+      (args) => args,
+    );
+    const policy = "Review the reports. Do not change settings or publish anything.";
+    window.addUser(policy);
+    for (const reply of ["continue", "why?", "approve", "next", "continue", "approve"]) {
+      window.addUser(reply);
+    }
+    window.addToolCall("publish", "bash", { command: "publish report" });
+    const result = packet(window);
+    expect(result.instructions[0]?.text).toBe(policy);
+    expect(result.instructions.at(-1)?.text).toBe("approve");
+    expect(result.omittedInstructions).toBe(false);
+  });
+
+  test("retains redacted approval context without promoting it to user policy or a final claim", () => {
+    const secret = 'PRIVATE-"proposal"\ncredential';
+    const obfuscator = new SecretObfuscator(
+      [{ type: "plain", content: secret, mode: "replace", replacement: "[redacted]" }],
+      "synthetic-packet-test-placeholder-key",
+    );
+    const window = new EvidenceWindow(
+      (text) => obfuscator.obfuscate(text),
+      (args) => obfuscateToolArguments(obfuscator, args),
+    );
+    window.addUser("Do not publish.");
+    window.addUser(
+      "Approve the local note only.",
+      `Write the local note using ${secret}. Do not publish.`,
+    );
+    window.addToolResult("note", "edit", "Local note updated.", false);
+    const result = packet(window, "complete");
+    expect(result.instructions.at(-1)).toMatchObject({
+      kind: "user",
+      text: "Approve the local note only.",
+      precedingAssistant: { text: "Write the local note using [redacted]. Do not publish." },
+    });
+    expect(result.evidence.some((item) => item.kind === "assistant")).toBe(false);
+    expect(JSON.stringify(result)).not.toContain("PRIVATE-");
+    result.instructions.at(-1)!.precedingAssistant!.text = "Publish everything.";
+    expect(packet(window).instructions.at(-1)?.precedingAssistant?.text).not.toContain(
+      "Publish everything.",
+    );
+  });
+
+  test("bounds approval context separately without evicting the original task policy", () => {
+    const window = new EvidenceWindow(
+      (text) => text,
+      (args) => args,
+    );
+    window.addUser("Do not publish.");
+    for (let index = 0; index < 8; index++) {
+      window.addUser("approve", `Proposal ${index}: ${"x".repeat(900)}`);
+    }
+    window.addToolResult("note", "edit", "Local note updated.", false);
+    const result = packet(window);
+    expect(result.instructions[0]?.text).toBe("Do not publish.");
+    expect(
+      result.instructions.reduce((n, item) => n + (item.precedingAssistant?.text.length ?? 0), 0),
+    ).toBeLessThanOrEqual(MAX_EVENT_CHARACTERS);
+    expect(result.instructions.at(-1)?.precedingAssistant?.text).toStartWith("Proposal 7:");
+    expect(result.instructions[1]?.precedingAssistant?.truncated).toBe(true);
+    expect(result.omittedInstructions).toBe(true);
+  });
+
   test("marks evicted history and bounds user instructions independently from tool output", () => {
     const window = new EvidenceWindow(
       (text) => text,
       (args) => args,
     );
-    for (let index = 0; index < MAX_USER_MESSAGES + 2; index++) {
-      window.addUser(`User requirement ${index}`);
+    for (let index = 0; index < 6; index++) {
+      window.addUser(`User requirement ${index}`.padEnd(1_000, "."));
     }
     for (let index = 0; index < MAX_EVIDENCE_EVENTS + 2; index++) {
       window.addToolResult(
@@ -155,12 +221,11 @@ describe("EvidenceWindow", () => {
     }
 
     const result = packet(window);
-    expect(result.instructions.map((item) => item.text)).toEqual([
-      "User requirement 2",
-      "User requirement 3",
-      "User requirement 4",
-      "User requirement 5",
-    ]);
+    expect(result.instructions[0]?.text).toStartWith("User requirement 2");
+    expect(result.instructions.at(-1)?.text).toStartWith("User requirement 5");
+    expect(
+      result.instructions.reduce((length, item) => length + item.text.length, 0),
+    ).toBeLessThanOrEqual(MAX_USER_CHARACTERS);
     expect(result.instructions.every((item) => item.kind === "user")).toBe(true);
     expect(result.evidence[0]?.toolCallId).toBe("run-2");
     expect(result.evidence.at(-1)?.toolCallId).toBe(`run-${MAX_EVIDENCE_EVENTS + 1}`);
@@ -168,12 +233,35 @@ describe("EvidenceWindow", () => {
     expect(result.omitted).toBe(true);
   });
 
+  test("distinguishes lost user policy from unrelated tool-output truncation", () => {
+    const window = new EvidenceWindow(
+      (text) => text,
+      (args) => args,
+    );
+    window.addUser("Do not apply migrations.");
+    window.addToolCall("docs", "read", { path: "docs/changelog.txt" });
+    window.addToolResult("docs", "read", "Historical documentation.\n".repeat(200), false);
+    expect(packet(window)).toMatchObject({
+      omitted: true,
+      omittedInstructions: false,
+      omittedEvidence: false,
+    });
+    window.addUser("Status-report detail.".repeat(250));
+    expect(packet(window)).toMatchObject({ omittedInstructions: true, omittedEvidence: false });
+    window.reset();
+    window.addUser("Run the current test.");
+    for (let index = 0; index <= MAX_EVIDENCE_EVENTS; index++) {
+      window.addToolResult(`run-${index}`, "bash", "Test passed.", false);
+    }
+    expect(packet(window)).toMatchObject({ omittedInstructions: false, omittedEvidence: true });
+  });
+
   test("bounds serialized packets even when JSON escaping expands every excerpt", () => {
     const window = new EvidenceWindow(
       (text) => text,
       (args) => args,
     );
-    for (let index = 0; index < MAX_USER_MESSAGES; index++) {
+    for (let index = 0; index < 4; index++) {
       window.addUser(
         `Requirement ${index}: ${"\u0000".repeat(MAX_USER_CHARACTERS)} user suffix ${index}`,
       );

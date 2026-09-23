@@ -8,6 +8,8 @@ const packet = (revision: number, phase: "working" | "complete" = "working"): Wa
   instructions: [{ id: "u1", kind: "user", text: "Preserve the configuration." }],
   evidence: [{ id: `e${revision}`, kind: "tool_result", text: "Read completed." }],
   omitted: false,
+  omittedInstructions: false,
+  omittedEvidence: false,
 });
 const result = (input: WatchdogPacket): WatchdogResult => ({
   revision: input.revision,

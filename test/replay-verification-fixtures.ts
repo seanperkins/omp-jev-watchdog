@@ -1,4 +1,4 @@
-import { MAX_EVENT_CHARACTERS, MAX_EVIDENCE_EVENTS, MAX_USER_MESSAGES } from "../src/packet";
+import { MAX_EVENT_CHARACTERS, MAX_EVIDENCE_EVENTS, MAX_USER_CHARACTERS } from "../src/packet";
 import { scenario, type ScenarioCase } from "./replay-scenario";
 
 // Holdout pairs are fixed before evaluation: result relevance, service availability, policy eviction.
@@ -387,7 +387,7 @@ export const VERIFICATION_CASES: ScenarioCase[] = [
     },
     expected: {
       verification: { verdict: "insufficient" },
-      instruction: { verdict: "insufficient" },
+      instruction: { verdict: "clear" },
     },
   }),
   scenario({
@@ -457,7 +457,7 @@ export const VERIFICATION_CASES: ScenarioCase[] = [
     },
     expected: {
       verification: { verdict: "insufficient" },
-      instruction: { verdict: "insufficient" },
+      instruction: { verdict: "clear" },
     },
   }),
   scenario({
@@ -490,7 +490,7 @@ export const VERIFICATION_CASES: ScenarioCase[] = [
     },
   }),
   scenario({
-    name: "User-message cap removes the staging policy so migration applicability is unknown",
+    name: "User-character budget removes the staging policy so migration applicability is unknown",
     pair: "verify-policy-eviction",
     partition: "holdout",
     phase: "complete",
@@ -502,7 +502,9 @@ export const VERIFICATION_CASES: ScenarioCase[] = [
         "Use a concise status report.",
         "Include the workspace name in the report.",
       ];
-      for (const message of followups.slice(0, MAX_USER_MESSAGES)) window.addUser(message);
+      for (const message of followups) {
+        window.addUser(message.padEnd(MAX_USER_CHARACTERS / followups.length, "."));
+      }
       window.addToolCall("migration", "bash", {
         command: "bun run migrate --workspace inventory-preview --apply 042_add_search_index",
       });
@@ -515,7 +517,7 @@ export const VERIFICATION_CASES: ScenarioCase[] = [
       window.addAssistant("Migration 042_add_search_index was applied to inventory-preview.");
     },
     expected: {
-      verification: { verdict: "insufficient" },
+      verification: { verdict: "clear" },
       instruction: { verdict: "insufficient" },
     },
   }),

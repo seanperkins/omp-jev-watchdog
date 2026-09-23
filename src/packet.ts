@@ -4,7 +4,6 @@ export const MAX_PACKET_CHARACTERS = 16_000;
 export const MAX_USER_CHARACTERS = 4_000;
 export const MAX_EVENT_CHARACTERS = 2_000;
 export const MAX_EVIDENCE_EVENTS = 32;
-export const MAX_USER_MESSAGES = 4;
 export const MAX_RECENT_FINGERPRINTS = 128;
 export const MAX_METADATA_CHARACTERS = 160;
 
@@ -20,7 +19,7 @@ function excerpt(text: string, limit: number): string {
   return text.slice(0, beginning) + separator + (ending > 0 ? text.slice(-ending) : "");
 }
 
-function shorten(item: Evidence, limit: number): void {
+function shorten(item: { text: string; truncated?: boolean }, limit: number): void {
   if (item.text.length <= limit) return;
   item.text = excerpt(item.text, limit);
   item.truncated = true;
@@ -36,6 +35,8 @@ export class EvidenceWindow {
   #evidence: Evidence[] = [];
   #seen = new Set<string>();
   #omitted = false;
+  #omittedInstructions = false;
+  #omittedEvidence = false;
 
   constructor(
     redact: (text: string) => string,
@@ -52,16 +53,23 @@ export class EvidenceWindow {
     this.#evidence.length = 0;
     this.#seen.clear();
     this.#omitted = false;
+    this.#omittedInstructions = false;
+    this.#omittedEvidence = false;
   }
 
-  addUser(text: string): void {
+  addUser(text: string, precedingAssistant?: string): void {
     const item = this.#prepare("user", this.#redact(text), MAX_USER_CHARACTERS);
     if (!item) return;
-    this.#instructions.push(item);
-    while (this.#instructions.length > MAX_USER_MESSAGES) {
-      this.#instructions.shift();
-      this.#omitted = true;
+    if (precedingAssistant?.trim()) {
+      item.precedingAssistant = { text: this.#redact(precedingAssistant) };
+      shorten(item.precedingAssistant, MAX_EVENT_CHARACTERS);
+      if (item.precedingAssistant.truncated) {
+        this.#omitted = true;
+        this.#omittedInstructions = true;
+      }
     }
+    if (item.truncated) this.#omittedInstructions = true;
+    this.#instructions.push(item);
     let characters = this.#instructions.reduce(
       (total, instruction) => total + instruction.text.length,
       0,
@@ -78,11 +86,31 @@ export class EvidenceWindow {
         characters -= excess;
       }
       this.#omitted = true;
+      this.#omittedInstructions = true;
+    }
+    let contextCharacters = this.#instructions.reduce(
+      (total, instruction) => total + (instruction.precedingAssistant?.text.length ?? 0),
+      0,
+    );
+    for (const instruction of this.#instructions) {
+      if (contextCharacters <= MAX_EVENT_CHARACTERS) break;
+      const context = instruction.precedingAssistant;
+      if (!context?.text) continue;
+      const length = context.text.length;
+      shorten(context, Math.max(0, length - (contextCharacters - MAX_EVENT_CHARACTERS)));
+      contextCharacters -= length - context.text.length;
+      this.#omitted = true;
+      this.#omittedInstructions = true;
     }
   }
 
-  addAssistant(text: string): void {
-    const item = this.#prepare("assistant", this.#redact(text), MAX_EVENT_CHARACTERS);
+  addAssistant(text: string, intermediate = false): void {
+    const item = this.#prepare(
+      "assistant",
+      this.#redact(text),
+      MAX_EVENT_CHARACTERS,
+      intermediate ? { intermediate: true } : {},
+    );
     if (item) this.#append(item);
   }
 
@@ -109,26 +137,42 @@ export class EvidenceWindow {
     const packet: WatchdogPacket = {
       revision: this.#revision,
       phase,
-      instructions: this.#instructions.map((item) => ({ ...item })),
+      instructions: this.#instructions.map((item) => ({
+        ...item,
+        ...(item.precedingAssistant ? { precedingAssistant: { ...item.precedingAssistant } } : {}),
+      })),
       evidence: this.#evidence.map((item) => ({ ...item })),
       omitted: this.#omitted,
+      omittedInstructions: this.#omittedInstructions,
+      omittedEvidence: this.#omittedEvidence,
     };
 
     // JSON escaping and metadata count toward the actual transport budget too.
     while (JSON.stringify(packet).length > MAX_PACKET_CHARACTERS) {
       packet.omitted = true;
+      const context = packet.instructions.find(
+        (item) => item.precedingAssistant?.text,
+      )?.precedingAssistant;
+      if (context) {
+        shorten(context, 0);
+        packet.omittedInstructions = true;
+        continue;
+      }
       if (packet.evidence.length > 1) {
         packet.evidence.shift();
+        packet.omittedEvidence = true;
         continue;
       }
       if (packet.instructions.length > 1) {
         packet.instructions.shift();
+        packet.omittedInstructions = true;
         continue;
       }
       const instruction = packet.instructions[0];
       const evidence = packet.evidence[0];
       if (!instruction || !evidence) return null;
       const longest = instruction.text.length >= evidence.text.length ? instruction : evidence;
+      if (longest.kind === "user") packet.omittedInstructions = true;
       // Both text fields at this floor plus bounded metadata fit even if every
       // character expands to a six-character JSON escape.
       shorten(
@@ -173,7 +217,10 @@ export class EvidenceWindow {
     kind: EvidenceKind,
     text: string,
     limit: number,
-    metadata: Pick<Evidence, "toolCallId" | "toolName" | "isError" | "truncated"> = {},
+    metadata: Pick<
+      Evidence,
+      "toolCallId" | "toolName" | "isError" | "truncated" | "intermediate"
+    > = {},
   ): Evidence | null {
     if ((kind === "user" || kind === "assistant") && text.trim().length === 0) return null;
     if (kind === "tool_call" || kind === "tool_result") {
@@ -202,6 +249,7 @@ export class EvidenceWindow {
     if (this.#evidence.length > MAX_EVIDENCE_EVENTS) {
       this.#evidence.shift();
       this.#omitted = true;
+      this.#omittedEvidence = true;
     }
   }
 }

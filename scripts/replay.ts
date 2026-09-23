@@ -35,10 +35,12 @@ function parseOptions(args: string[]): ReplayOptions {
         suite !== "holdout" &&
         suite !== "chronology-development" &&
         suite !== "chronology-holdout" &&
+        suite !== "coverage" &&
+        suite !== "context" &&
         suite !== "all"
       ) {
         throw new ReplayCliError(
-          "Use --suite original, development, holdout, chronology-development, chronology-holdout, or all.",
+          "Use --suite original, development, holdout, chronology-development, chronology-holdout, coverage, context, or all.",
         );
       }
       if (options.suite !== undefined)

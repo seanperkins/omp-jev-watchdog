@@ -1,5 +1,7 @@
 import { CHRONOLOGY_DEVELOPMENT_CASES } from "./replay-chronology-development";
 import { CHRONOLOGY_HOLDOUT_CASES } from "./replay-chronology-holdout";
+import { CONTEXT_CASES } from "./replay-context-fixtures";
+import { COVERAGE_CASES } from "./replay-coverage-fixtures";
 import { REPLAY_CASES, type ReplayCase } from "./replay-fixtures";
 import type { ScenarioCase } from "./replay-scenario";
 import { SCOPE_CASES } from "./replay-scope-fixtures";
@@ -13,6 +15,8 @@ export type ReplaySuite =
   | "holdout"
   | "chronology-development"
   | "chronology-holdout"
+  | "coverage"
+  | "context"
   | "all";
 
 export const REPLAY_SUITES: Record<ReplaySuite, ReplayCase[]> = {
@@ -24,10 +28,14 @@ export const REPLAY_SUITES: Record<ReplaySuite, ReplayCase[]> = {
   holdout: SCENARIO_CASES.filter((fixture) => fixture.partition === "holdout"),
   "chronology-development": CHRONOLOGY_DEVELOPMENT_CASES,
   "chronology-holdout": CHRONOLOGY_HOLDOUT_CASES,
+  coverage: COVERAGE_CASES,
+  context: CONTEXT_CASES,
   all: [
     ...REPLAY_CASES,
     ...SCENARIO_CASES,
     ...CHRONOLOGY_DEVELOPMENT_CASES,
     ...CHRONOLOGY_HOLDOUT_CASES,
+    ...COVERAGE_CASES,
+    ...CONTEXT_CASES,
   ],
 };

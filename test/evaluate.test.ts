@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import type { ChoiceAnswer, Questions } from "@oh-my-pi/pi-ai";
 import type { FetchImpl } from "@oh-my-pi/pi-catalog/types";
 import { evaluateWatchdog } from "../src/evaluate";
+import { EvidenceWindow } from "../src/packet";
 import type { WatchdogPacket } from "../src/types";
 import { REPLAY_CASES } from "./replay-fixtures";
 
@@ -94,6 +95,28 @@ describe("native TypeSafe watchdog boundary", () => {
     });
   });
 
+  test("one typed decision plus supporting citations determines the verdict", async () => {
+    const result = await evaluateWatchdog(failurePacket(), {
+      apiKey: "local-test-only",
+      fetch: async (_input, init) => {
+        const body = responseBody(init, {
+          verification_reason: "verification_contradiction",
+          verification_claim: "e3",
+          verification_evidence: "e2",
+        });
+        delete body.answers.instruction;
+        delete body.answers.verification;
+        return Response.json(body);
+      },
+    });
+    expect(result.status).toBe("checked");
+    expect(result.checks.find((check) => check.kind === "verification")).toMatchObject({
+      verdict: "concern",
+      reason: "verification_contradiction",
+      evidenceIds: ["e3", "e2"],
+    });
+  });
+
   test("instruction candidates require both action and explicit user instruction", async () => {
     const packet = fixture("explicit forbidden file action is a candidate conflict");
     const result = await evaluateWatchdog(packet, {
@@ -146,6 +169,139 @@ describe("native TypeSafe watchdog boundary", () => {
       verdict: "insufficient",
       reason: "missing_evidence",
       evidenceIds: [],
+    });
+  });
+
+  test("completion without a captured claim cannot report verification clear", async () => {
+    const packet = failurePacket();
+    packet.evidence = packet.evidence.filter((item) => item.kind !== "assistant");
+    const result = await evaluateWatchdog(packet, {
+      apiKey: "local-test-only",
+      fetch: async (_input, init) => Response.json(responseBody(init)),
+    });
+    expect(result.status).toBe("checked");
+    expect(result.checks.find((check) => check.kind === "verification")).toMatchObject({
+      verdict: "insufficient",
+      reason: "missing_evidence",
+      evidenceIds: [],
+    });
+  });
+
+  test("an accepted terminal yield is the claim, not its success acknowledgment", async () => {
+    const packet = failurePacket();
+    packet.evidence.push(
+      {
+        id: "e4",
+        kind: "tool_call",
+        toolCallId: "submit",
+        toolName: "yield",
+        text: JSON.stringify({ data: { summary: "All parser tests passed." }, type: null }),
+      },
+      {
+        id: "e5",
+        kind: "tool_result",
+        toolCallId: "submit",
+        toolName: "yield",
+        text: "Result submitted.",
+        isError: false,
+      },
+    );
+    const result = await evaluateWatchdog(packet, {
+      apiKey: "local-test-only",
+      fetch: async (_input, init) =>
+        Response.json(
+          responseBody(init, {
+            verification: "concern",
+            verification_claim: "e4",
+            verification_evidence: "e2",
+          }),
+        ),
+    });
+    expect(result.checks.find((check) => check.kind === "verification")).toMatchObject({
+      verdict: "concern",
+      evidenceIds: ["e4", "e2"],
+    });
+  });
+
+  test.each(["rejected", "incremental", "truncated", "aborted"])(
+    "%s yield cannot substitute stale assistant prose for a final claim",
+    async (variant) => {
+      const packet = failurePacket();
+      packet.evidence.push(
+        {
+          id: "e4",
+          kind: "tool_call",
+          toolCallId: "submit",
+          toolName: "yield",
+          text: JSON.stringify(
+            variant === "aborted"
+              ? { error: "Could not complete the assignment." }
+              : {
+                  data: "All parser tests passed.",
+                  type: variant === "incremental" ? ["summary"] : null,
+                },
+          ),
+          ...(variant === "truncated" ? { truncated: true } : {}),
+        },
+        {
+          id: "e5",
+          kind: "tool_result",
+          toolCallId: "submit",
+          toolName: "yield",
+          text: variant === "rejected" ? "Output rejected." : "Result submitted.",
+          isError: variant === "rejected",
+        },
+      );
+      const result = await evaluateWatchdog(packet, {
+        apiKey: "local-test-only",
+        fetch: async (_input, init) => Response.json(responseBody(init)),
+      });
+      expect(result.checks.find((check) => check.kind === "verification")).toMatchObject({
+        verdict: "insufficient",
+        evidenceIds: [],
+      });
+    },
+  );
+
+  test("same-turn working prose is not a terminal verification claim", async () => {
+    const window = new EvidenceWindow(
+      (text) => text,
+      (args) => args,
+    );
+    window.addUser("Run the parser test.");
+    window.addToolCall("parser", "bash", { command: "bun test test/parser.test.ts" });
+    window.addToolResult("parser", "bash", "Parser test failed.", true);
+    // Host turn_end delivers the text after its tool_result callbacks.
+    window.addAssistant("The parser test passes; checking the final run now.", true);
+    const packet = window.snapshot("complete");
+    if (!packet) throw new Error("Missing completion packet");
+    const result = await evaluateWatchdog(packet, {
+      apiKey: "local-test-only",
+      fetch: async (_input, init) => Response.json(responseBody(init)),
+    });
+    expect(result.checks.find((check) => check.kind === "verification")).toMatchObject({
+      verdict: "insufficient",
+      reason: "missing_evidence",
+    });
+  });
+
+  test("additional tool work invalidates an earlier completion claim", async () => {
+    const packet = failurePacket();
+    packet.evidence.push({
+      id: "e4",
+      kind: "tool_result",
+      toolCallId: "later-run",
+      toolName: "bash",
+      text: "New parser run failed.",
+      isError: true,
+    });
+    const result = await evaluateWatchdog(packet, {
+      apiKey: "local-test-only",
+      fetch: async (_input, init) => Response.json(responseBody(init)),
+    });
+    expect(result.checks.find((check) => check.kind === "verification")).toMatchObject({
+      verdict: "insufficient",
+      reason: "missing_evidence",
     });
   });
 
@@ -284,12 +440,12 @@ describe("native TypeSafe watchdog boundary", () => {
     expect(result).toMatchObject({ status: "not_checked", reason: "invalid_response", checks: [] });
   });
 
-  test("missing required answers are withheld", async () => {
+  test("missing required selector answers are withheld", async () => {
     const result = await evaluateWatchdog(failurePacket(), {
       apiKey: "local-test-only",
       fetch: async (_input, init) => {
         const body = responseBody(init);
-        delete body.answers.instruction;
+        delete body.answers.verification_evidence;
         return Response.json(body);
       },
     });

@@ -1,11 +1,9 @@
 import { type ApiKey, type ChoiceAnswer, type Questions, TypeSafeJudge } from "@oh-my-pi/pi-ai";
 import type { FetchImpl } from "@oh-my-pi/pi-catalog/types";
 import { isRecord } from "@oh-my-pi/pi-utils";
-import verificationPrompt from "./prompts/verification.md" with { type: "text" };
 import verificationClaimPrompt from "./prompts/verification-claim.md" with { type: "text" };
 import verificationEvidencePrompt from "./prompts/verification-evidence.md" with { type: "text" };
 import verificationReasonPrompt from "./prompts/verification-reason.md" with { type: "text" };
-import instructionPrompt from "./prompts/instruction.md" with { type: "text" };
 import instructionEvidencePrompt from "./prompts/instruction-evidence.md" with { type: "text" };
 import instructionRulePrompt from "./prompts/instruction-rule.md" with { type: "text" };
 import instructionReasonPrompt from "./prompts/instruction-reason.md" with { type: "text" };
@@ -25,7 +23,6 @@ export interface EvaluateWatchdogOptions {
 }
 
 const NONE = "__none__";
-const VERDICTS = { clear: null, concern: null, insufficient: null };
 const REASONS = {
   instruction: {
     no_conflict: null,
@@ -42,17 +39,23 @@ const REASONS = {
     truncated_context: null,
   },
 };
+const REASON_VERDICTS: Record<WatchdogCheckReason, WatchdogCheck["verdict"]> = {
+  no_conflict: "clear",
+  verification_contradiction: "concern",
+  instruction_conflict: "concern",
+  missing_evidence: "insufficient",
+  ambiguous_scope: "insufficient",
+  truncated_context: "insufficient",
+};
 
 // Bump the contract marker when non-prompt evaluator semantics change.
 export const WATCHDOG_RUBRIC_HASH: string = new Bun.CryptoHasher("sha256")
   .update(
     JSON.stringify([
-      "watchdog-evaluator/v2:typed-reasons:strict-choices:paired-citations:truncation-downgrade",
-      instructionPrompt,
+      "watchdog-evaluator/v4:bounded-approval-context:atomic-reasons:scoped-omissions:terminal-yield-claims:strict-citations",
       instructionEvidencePrompt,
       instructionRulePrompt,
       instructionReasonPrompt,
-      verificationPrompt,
       verificationClaimPrompt,
       verificationEvidencePrompt,
       verificationReasonPrompt,
@@ -102,28 +105,6 @@ function validAnswers(value: unknown, questions: Questions): value is Record<str
   return true;
 }
 
-function validReason(
-  kind: WatchdogCheck["kind"],
-  verdict: WatchdogCheck["verdict"],
-  reason: string | undefined,
-  incomplete: boolean,
-): reason is WatchdogCheckReason {
-  switch (verdict) {
-    case "clear":
-      return reason === "no_conflict";
-    case "concern":
-      return (
-        reason === (kind === "verification" ? "verification_contradiction" : "instruction_conflict")
-      );
-    case "insufficient":
-      return (
-        reason === "missing_evidence" ||
-        reason === "ambiguous_scope" ||
-        (reason === "truncated_context" && incomplete)
-      );
-  }
-}
-
 function makeCheck(
   kind: WatchdogCheck["kind"],
   answers: Record<string, ChoiceAnswer>,
@@ -131,16 +112,15 @@ function makeCheck(
   anchors: Evidence[],
   incomplete: boolean,
 ): WatchdogCheck | undefined {
-  const answer = answers[kind];
-  if (answer === undefined) return undefined;
+  const answer = answers[`${kind}_reason`];
+  if (answer === undefined || !Object.hasOwn(REASONS[kind], answer.choice)) return undefined;
   const source = sources.find((item) => item.id === answers[`${kind}_evidence`]?.choice);
   const anchor = anchors.find(
     (item) => item.id === answers[`${kind}_${kind === "verification" ? "claim" : "rule"}`]?.choice,
   );
-  const verdict = answer.choice;
-  if (verdict !== "concern" && verdict !== "clear" && verdict !== "insufficient") return undefined;
-  const reason = answers[`${kind}_reason`]?.choice;
-  if (!validReason(kind, verdict, reason, incomplete)) return undefined;
+  const reason = answer.choice as WatchdogCheckReason;
+  const verdict = REASON_VERDICTS[reason];
+  if (reason === "truncated_context" && !incomplete) return undefined;
   if (verdict === "concern" && (source === undefined || anchor === undefined)) return undefined;
   if (verdict !== "concern" && (source !== undefined || anchor !== undefined)) return undefined;
   if (verdict === "concern" && (source?.truncated || anchor?.truncated)) {
@@ -184,6 +164,52 @@ function makeCheck(
   };
 }
 
+function completionClaim(packet: WatchdogPacket): Evidence | undefined {
+  const lastActionIndex = packet.evidence.findLastIndex(
+    (item) => item.kind === "tool_call" || item.kind === "tool_result",
+  );
+  const lastAction = packet.evidence[lastActionIndex];
+  if (lastAction?.toolName === "yield") {
+    if (
+      lastAction.kind !== "tool_result" ||
+      lastAction.isError !== false ||
+      lastAction.truncated ||
+      !lastAction.toolCallId
+    )
+      return undefined;
+    const call = packet.evidence.findLast(
+      (item, index) =>
+        index < lastActionIndex &&
+        item.kind === "tool_call" &&
+        item.toolName === "yield" &&
+        item.toolCallId === lastAction.toolCallId,
+    );
+    if (!call || call.truncated) return undefined;
+    try {
+      // Canonical arguments were natively redacted before JSON encoding at ingestion.
+      // Acknowledgments and detail objects are never promoted to assistant claims.
+      const input: unknown = JSON.parse(call.text);
+      if (
+        !isRecord(input) ||
+        input.data === undefined ||
+        input.data === null ||
+        (input.type !== undefined && input.type !== null && typeof input.type !== "string") ||
+        (input.error !== undefined && input.error !== null && input.error !== "") ||
+        (input.key !== undefined && input.key !== null)
+      )
+        return undefined;
+      const text = typeof input.data === "string" ? input.data : JSON.stringify(input.data);
+      return text.trim() ? { ...call, text } : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+  const claimIndex = packet.evidence.findLastIndex(
+    (item) => item.kind === "assistant" && !item.intermediate,
+  );
+  return claimIndex > lastActionIndex ? packet.evidence[claimIndex] : undefined;
+}
+
 /** Independent shadow judgment. Confidence is an uncalibrated model signal, not correctness probability. */
 export async function evaluateWatchdog(
   packet: WatchdogPacket,
@@ -218,17 +244,21 @@ export async function evaluateWatchdog(
   const actions = packet.evidence.filter(
     (item) => item.kind === "tool_call" || item.kind === "tool_result",
   );
-  const claims = packet.evidence.filter((item) => item.kind === "assistant").slice(-1);
-  const results = packet.evidence.filter((item) => item.kind === "tool_result");
+  const claim = packet.phase === "complete" ? completionClaim(packet) : undefined;
+  const claims = claim ? [claim] : [];
+  const results = packet.evidence.filter(
+    (item) => item.kind === "tool_result" && item.toolName !== "yield",
+  );
   const state = {
     phase: packet.phase,
     omitted: packet.omitted,
+    omittedInstructions: packet.omittedInstructions,
+    omittedEvidence: packet.omittedEvidence,
     instructions,
     actions,
     verificationClaim: packet.phase === "complete" ? claims[0] : undefined,
   };
   const questions: Questions = {
-    instruction: { type: "choice", instructions: instructionPrompt, criteria: VERDICTS },
     instruction_reason: {
       type: "choice",
       instructions: instructionReasonPrompt,
@@ -247,12 +277,7 @@ export async function evaluateWatchdog(
       instructions: instructionRulePrompt,
       criteria: selectors(instructions),
     };
-  if (packet.phase === "complete") {
-    questions.verification = {
-      type: "choice",
-      instructions: verificationPrompt,
-      criteria: VERDICTS,
-    };
+  if (packet.phase === "complete" && claim) {
     questions.verification_reason = {
       type: "choice",
       instructions: verificationReasonPrompt,
@@ -316,11 +341,26 @@ export async function evaluateWatchdog(
     )
       return unavailable("invalid_response");
     const checks: WatchdogCheck[] = [];
-    const incomplete = packet.omitted || allEvidence.some((item) => item.truncated === true);
+    const incomplete =
+      packet.omitted ||
+      allEvidence.some(
+        (item) => item.truncated === true || item.precedingAssistant?.truncated === true,
+      );
     if (packet.phase === "complete") {
-      const check = makeCheck("verification", response.answers, results, claims, incomplete);
-      if (check === undefined) return unavailable("invalid_response");
-      checks.push(check);
+      if (!claim) {
+        checks.push({
+          kind: "verification",
+          verdict: "insufficient",
+          reason: "missing_evidence",
+          confidence: 0,
+          evidenceIds: [],
+          summary: "No final assistant claim was captured; verification could not be assessed.",
+        });
+      } else {
+        const check = makeCheck("verification", response.answers, results, claims, incomplete);
+        if (check === undefined) return unavailable("invalid_response");
+        checks.push(check);
+      }
     }
     const instruction = makeCheck(
       "instruction",

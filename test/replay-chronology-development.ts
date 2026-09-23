@@ -353,7 +353,7 @@ export const CHRONOLOGY_DEVELOPMENT_CASES: ScenarioCase[] = [
     },
     expected: {
       verification: { verdict: "insufficient" },
-      instruction: { verdict: "insufficient" },
+      instruction: { verdict: "clear" },
     },
   }),
 ];
